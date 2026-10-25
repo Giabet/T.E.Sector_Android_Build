@@ -1,0 +1,64 @@
+name: TESector Android patch diagnostics
+on:
+  workflow_dispatch:
+    inputs:
+      tesector_ref:
+        description: TESector branch/tag/commit to inspect
+        required: true
+        default: master
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out TESector and its engine
+        env:
+          TES_REF: ${{ inputs.tesector_ref }}
+        run: |
+          git clone https://github.com/JasmineRickards/TESector.git tesector-src
+          cd tesector-src
+          git checkout "$TES_REF"
+          git submodule update --init --recursive
+          git rev-parse HEAD > ../tesector-commit.txt
+          git -C RobustToolbox rev-parse HEAD > ../engine-commit.txt
+      - name: Record Android engine patch rejects
+        shell: bash
+        run: |
+          set +e
+          cd tesector-src/RobustToolbox
+          git apply --reject --whitespace=nowarn ../../patches/mobile.patch > ../../engine-apply.log 2>&1
+          result=$?
+          printf 'git apply exit status: %s\n' "$result" > ../../engine-apply-status.txt
+          exit 0
+      - name: Record Android game patch rejects
+        shell: bash
+        run: |
+          set +e
+          cd tesector-src
+          git apply --reject --whitespace=nowarn ../patches/client-fixes.patch > ../game-apply.log 2>&1
+          result=$?
+          printf 'git apply exit status: %s\n' "$result" > ../game-apply-status.txt
+          exit 0
+      - name: Package rejects with corresponding original files
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib, zipfile
+          root=pathlib.Path('tesector-src')
+          with zipfile.ZipFile('tesector-diagnostics.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for name in ('tesector-commit.txt','engine-commit.txt','engine-apply.log','game-apply.log','engine-apply-status.txt','game-apply-status.txt'):
+                  z.write(name)
+              reject_files=list(root.rglob('*.rej'))
+              for rej in reject_files:
+                  z.write(rej)
+                  source=rej.with_suffix('')
+                  if source.is_file(): z.write(source)
+              z.writestr('SUMMARY.txt', f'Rejected patch files: {len(reject_files)}\nThis is diagnostic source code, not a compiled APK.\n')
+          PY
+      - name: Upload diagnostic ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: tesector-patch-diagnostics
+          path: tesector-diagnostics.zip
+          if-no-files-found: error
