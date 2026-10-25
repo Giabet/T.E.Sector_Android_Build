@@ -1,0 +1,73 @@
+name: TESector Android compatibility build (experimental)
+on:
+  workflow_dispatch:
+    inputs:
+      tesector_ref:
+        description: 'TESector git branch, tag or commit deployed on server'
+        default: 'master'
+        required: true
+      engine_ref:
+        description: 'Optional RobustToolbox git commit override; leave empty to use TESector pinned submodule'
+        default: ''
+        required: false
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch TESector including pinned engine
+        env:
+          TES_REF: ${{ inputs.tesector_ref }}
+          ENGINE_REF: ${{ inputs.engine_ref }}
+        run: |
+          git clone https://github.com/JasmineRickards/TESector.git space-station-14
+          cd space-station-14
+          git checkout "$TES_REF"
+          git submodule update --init --recursive
+          if [ -n "$ENGINE_REF" ]; then
+            git -C RobustToolbox fetch origin "$ENGINE_REF"
+            git -C RobustToolbox checkout "$ENGINE_REF"
+          fi
+          echo "TESector commit: $(git rev-parse HEAD)"
+          echo "RobustToolbox commit: $(git -C RobustToolbox rev-parse HEAD)"
+      - name: Check and apply Android engine patch
+        run: |
+          cd space-station-14/RobustToolbox
+          if ! git apply --check ../../patches/mobile.patch; then
+            echo 'ERROR: The Android engine patch is incompatible with this TESector engine commit.' >&2
+            echo 'A developer must port mobile.patch to the older engine; no APK will be produced.' >&2
+            exit 1
+          fi
+          git apply ../../patches/mobile.patch
+      - name: Check and apply Android game patch
+        run: |
+          cd space-station-14
+          if ! git apply --check ../patches/client-fixes.patch; then
+            echo 'ERROR: Client patch does not apply to TESector content. Manual porting required.' >&2
+            exit 1
+          fi
+          git apply ../patches/client-fixes.patch
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install native library dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build autoconf automake libtool
+      - name: Build native libraries
+        run: bash scripts/build-native-libs.sh
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Install Android workload
+        run: dotnet workload install android
+      - name: Build Android APK
+        run: dotnet build Content.Android/Content.Android.csproj -c Release
+      - name: Upload APK if compilation succeeds
+        uses: actions/upload-artifact@v4
+        with:
+          name: TESector-Android-experimental-APK
+          path: Content.Android/bin/Release/**/*.apk
+          if-no-files-found: error
